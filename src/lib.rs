@@ -304,7 +304,7 @@ mod tests {
         let key = b"greeting";
         let value = b"hello";
         let expected_value: Result<_, Box<dyn Error>> = Ok(None);
-        store.set(key, value, Some(past));
+        store.set(key, value, Some(past)).unwrap();
 
         let actual_value = store.get(key);
         assert_eq!(actual_value.unwrap(), expected_value.unwrap());
@@ -313,7 +313,7 @@ mod tests {
         let actual_unchecked_value = store.get_unchecked(key);
         assert_eq!(expected_unchecked_value.unwrap(), actual_unchecked_value.unwrap());
 
-        store.evict();
+        store.evict().unwrap();
 
         let actual_value: Result<_, Box<dyn Error>> = store.get(key);
         assert_eq!(actual_value.unwrap(), None);
@@ -328,7 +328,7 @@ mod tests {
         let key = b"greeting";
         let value = b"hello";
         let expected_value: Result<_, Box<dyn Error>> = Ok(Some(value.to_vec()));
-        store.set(key, value, Some(future));
+        store.set(key, value, Some(future)).unwrap();
 
         let actual_value = store.get(key);
         assert_eq!(actual_value.unwrap(), expected_value.unwrap())
