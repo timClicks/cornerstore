@@ -5,8 +5,6 @@
 //! internal state.
 //!
 //! Writes (via set) are slower, so that reads (get) can be made faster.
-//! Among other implementation details, CornerStore will pre-calculate hash
-//! function values to speed up comparisons later on.
 //!
 //! ## References
 //!
@@ -71,6 +69,7 @@ pub struct CornerStore {
     /// Timestamp of when expired items were evicted from the cache  
     created_at: Instant,
 
+    /// Sharded internal storage
     data: Vec<RwLock<HashMap<HiddenKey, KeyValuePair>>>,
 }
 
