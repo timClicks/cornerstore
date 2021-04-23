@@ -128,7 +128,7 @@ impl CornerStore {
         }
     }
 
-    /// Retrieve a key/value paid, even if they are stale
+    /// Retrieve a key/value pair, even if the pair is stale.
     pub fn get_key_value_unchecked(
         &self,
         key: &[u8],
@@ -288,7 +288,7 @@ mod tests {
 
         let key = b"greeting";
         let expected_value = b"hello";
-        store.set(key, expected_value, None);
+        store.set(key, expected_value, None).unwrap();
 
         let actual_value = store.get(key).unwrap();
         assert_eq!(actual_value.unwrap(), expected_value.to_vec())
