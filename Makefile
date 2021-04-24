@@ -1,5 +1,9 @@
 all: build
 
+test:
+	cargo test
+	cargo test --features safe-input
+
 clean:
 	cargo clean
 

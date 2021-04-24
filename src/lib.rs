@@ -13,30 +13,43 @@
 #[global_allocator]
 static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
-use std::sync::RwLock;
-use std::{collections::hash_map::DefaultHasher, error::Error};
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::Instant,
-};
-
 use std::hash::{Hash, Hasher};
+use std::{error::Error};
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Instant};
+use std::{sync::RwLock};
+
+#[cfg(feature = "safe-input")]
+use fxhash;
+#[cfg(not(feature = "safe-input"))]
+use std::collections::hash_map::{DefaultHasher};
 
 const SHARDS: usize = 128;
 
 type Bytes = Vec<u8>; // we can tolerate
 
-/// HiddenKey is a pre-calculated hash of the key
-/// provided by the user.
+/// HiddenKey is a pre-calculated hash of the key provided by
+/// the user. The key is stored in multiple places, keeping it
+/// as a fixed length means that memory is more manageable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct HiddenKey(u64);
 
 impl HiddenKey {
+    #[cfg(not(feature = "safe-input"))]
     #[inline]
     fn new(key: &[u8]) -> Self {
+ 
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let ident = hasher.finish();
+
+        HiddenKey(ident)
+    }
+
+    #[cfg(feature = "safe-input")]
+    #[inline]
+    fn new(key: &[u8]) -> Self {
+        let ident: u64 = fxhash::hash64(key);
 
         HiddenKey(ident)
     }
@@ -58,9 +71,11 @@ struct KeyValuePair {
     expiry: Option<Instant>,
 }
 
+/// The "back of house" for the CornerStore.
+///
 /// Keys and values are untyped byte-streams of arbitrary length
 #[derive(Debug)]
-pub struct CornerStore {
+pub(crate) struct BoH {
     //  TODO: make lock more granular
     /// Map times to 1 or more keys. Using BTreeMap because we'll want
     /// to take ranges of values.
@@ -73,24 +88,43 @@ pub struct CornerStore {
     data: Vec<RwLock<HashMap<HiddenKey, KeyValuePair>>>,
 }
 
+/// A thread-safe store for perishable items.
+///
+/// Keys and values are untyped byte-streams of arbitrary length
+pub struct CornerStore(std::sync::Arc<BoH>);
+
 impl CornerStore {
     pub fn new() -> Self {
         let mut store = Vec::with_capacity(SHARDS);
         for _ in 0..SHARDS {
             store.push(RwLock::new(HashMap::new()));
         }
-        CornerStore {
+        let boh = BoH {
             data: store,
             created_at: Instant::now(),
             expiry_times: RwLock::new(BTreeMap::new()),
+        };
+        CornerStore(std::sync::Arc::new(boh))
+    }
+
+    pub fn with_capacity(cap: usize) -> Self {
+        let mut store = Vec::with_capacity(SHARDS);
+        for _ in 0..SHARDS {
+            store.push(RwLock::new(HashMap::with_capacity(cap / SHARDS)));
         }
+        let boh = BoH {
+            data: store,
+            created_at: Instant::now(),
+            expiry_times: RwLock::new(BTreeMap::new()),
+        };
+        CornerStore(std::sync::Arc::new(boh))
     }
 
     /// Get an item, but only if it has not expired
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Box<dyn Error + '_>> {
         let hidden_key = HiddenKey::new(&key);
 
-        let shard = &self.data[hidden_key.shard()];
+        let shard = &self.0.data[hidden_key.shard()];
         if let Some(kv_pair) = shard.read()?.get(&hidden_key) {
             if let Some(expiry) = kv_pair.expiry {
                 if expiry <= Instant::now() {
@@ -106,7 +140,7 @@ impl CornerStore {
     /// Retrieve a key/value paid, but only if they have not expired
     pub fn get_key_value(&self, key: &[u8]) -> Result<Option<(Bytes, Bytes)>, Box<dyn Error + '_>> {
         let hidden_key = HiddenKey::new(&key);
-        let shard = &self.data[hidden_key.shard()];
+        let shard = &self.0.data[hidden_key.shard()];
 
         if let Some(kv_pair) = shard.read()?.get(&hidden_key) {
             Ok(Some((kv_pair.key.clone(), kv_pair.value.clone())))
@@ -118,7 +152,7 @@ impl CornerStore {
     /// Retrieve a value, even if it is stale
     pub fn get_unchecked(&self, key: &[u8]) -> Result<Option<Bytes>, Box<dyn Error + '_>> {
         let hidden_key = HiddenKey::new(&key);
-        let shard = &self.data[hidden_key.shard()];
+        let shard = &self.0.data[hidden_key.shard()];
 
         if let Some(kv_pair) = shard.read()?.get(&hidden_key) {
             Ok(Some(kv_pair.value.clone()))
@@ -133,7 +167,7 @@ impl CornerStore {
         key: &[u8],
     ) -> Result<Option<(Bytes, Bytes)>, Box<dyn Error + '_>> {
         let hidden_key = HiddenKey::new(&key);
-        let shard = &self.data[hidden_key.shard()];
+        let shard = &self.0.data[hidden_key.shard()];
 
         if let Some(kv_pair) = shard.read()?.get(&hidden_key) {
             Ok(Some((kv_pair.key.clone(), kv_pair.value.clone())))
@@ -158,7 +192,8 @@ impl CornerStore {
         let kv_pair = KeyValuePair { key, value, expiry };
 
         if let Some(time) = expiry {
-            self.expiry_times
+            self.0
+                .expiry_times
                 .write()?
                 .entry(time)
                 .or_insert_with(|| vec![hidden_key]);
@@ -166,7 +201,7 @@ impl CornerStore {
 
         {
             let shard = hidden_key.shard();
-            let _ = self.data[shard].write()?.insert(hidden_key, kv_pair);
+            let _ = self.0.data[shard].write()?.insert(hidden_key, kv_pair);
         }
 
         Ok(())
@@ -188,7 +223,7 @@ impl CornerStore {
 
         let mut expiry = None;
         {
-            let shard = &self.data[hidden_key.shard()];
+            let shard = &self.0.data[hidden_key.shard()];
             let mut lock = shard.write()?;
             if let Some(kv_pair) = lock.get_mut(&hidden_key) {
                 expiry = kv_pair.expiry.clone(); // copying out of this scope to avoid deadlock
@@ -197,7 +232,7 @@ impl CornerStore {
         }
 
         if let Some(expiry) = expiry {
-            if let Some(keys) = self.expiry_times.write()?.get_mut(&expiry) {
+            if let Some(keys) = self.0.expiry_times.write()?.get_mut(&expiry) {
                 keys.retain(|&x| x != hidden_key);
             }
         }
@@ -212,17 +247,17 @@ impl CornerStore {
         let mut times_to_remove = vec![];
         let mut items_to_remove: Vec<HiddenKey> = vec![];
 
-        for (expiry, items) in self.expiry_times.read()?.range(self.created_at..now) {
+        for (expiry, items) in self.0.expiry_times.read()?.range(self.0.created_at..now) {
             // Avoid deleting things while holding the read lock - potential deadlock
             times_to_remove.push(expiry.clone());
             items_to_remove.extend(items);
         }
 
         for item in &items_to_remove {
-            self.data[item.shard()].write()?.remove(&item);
+            self.0.data[item.shard()].write()?.remove(&item);
         }
         for expiry in &times_to_remove {
-            &mut self.expiry_times.write()?.remove(expiry);
+            &mut self.0.expiry_times.write()?.remove(expiry);
         }
 
         Ok(())
@@ -278,8 +313,8 @@ impl CornerStore {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_can_store_data() {
@@ -295,7 +330,6 @@ mod tests {
 
     #[test]
     fn test_expired_data_is_not_returned() {
-
         let mut store = CornerStore::new();
 
         let past = Instant::now() - Duration::new(1, 0);
@@ -310,7 +344,10 @@ mod tests {
 
         let expected_unchecked_value: Result<_, Box<dyn Error>> = Ok(Some(value.to_vec()));
         let actual_unchecked_value = store.get_unchecked(key);
-        assert_eq!(expected_unchecked_value.unwrap(), actual_unchecked_value.unwrap());
+        assert_eq!(
+            expected_unchecked_value.unwrap(),
+            actual_unchecked_value.unwrap()
+        );
 
         store.evict().unwrap();
 
