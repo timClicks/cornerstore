@@ -1,7 +1,15 @@
 [package]
 name = "cornerstore"
+authors = [ "Tim McNamara <code@timmcnamara.co.nz>" ]
+description = "An in-memory key/value store for read-heavy workloads with expireable items."
 version = "0.1.0"
 edition = "2018"
+readme = "README.md"
+license = "Apache-2.0"
+license-file = "LICENCE"
+keywords = [ "cache", "concurrency" ]
+categories = [ "caching" ]
+repository = "https://github.com/timClicks/cornerstore"
 
 # https://doc.rust-lang.org/edition-guide/rust-2018/platform-and-target-support/cdylib-crates-for-c-interoperability.html
 [lib]
